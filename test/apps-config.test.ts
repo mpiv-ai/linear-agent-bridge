@@ -1,4 +1,4 @@
-import { chmodSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { chmodSync, mkdirSync, mkdtempSync, rmSync, statSync, writeFileSync } from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
@@ -209,6 +209,18 @@ describe("BRIDGE_APPS_FILE", () => {
     expect(() =>
       parseAppsConfig({ apps: [builderApp({ agentOutputPath: "out" })] }, base, {}),
     ).toThrow("agentOutputPath: expected an absolute path");
+  });
+
+  it("checks an app's output folder the way AGENT_OUTPUT_PATH is checked", () => {
+    const created = path.join(dir, "created-output");
+    const parsed = parseAppsConfig({ apps: [builderApp({ agentOutputPath: created })] }, base, {});
+    expect(parsed.apps[0]!.config.agentOutputPath).toBe(created);
+    expect(statSync(created).isDirectory()).toBe(true);
+
+    const notADirectory = secretFile("not-a-directory", "x");
+    expect(() =>
+      parseAppsConfig({ apps: [builderApp({ agentOutputPath: notADirectory })] }, base, {}),
+    ).toThrow(/Invalid apps\[0\]\.agentOutputPath ".*": expected a directory/);
   });
 
   it("requires an apps array", () => {

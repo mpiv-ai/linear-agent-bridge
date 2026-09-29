@@ -1,6 +1,6 @@
 import { readFileSync, statSync } from "node:fs";
 import * as path from "node:path";
-import type { Config } from "./config.js";
+import { resolveAgentOutputPath, type Config } from "./config.js";
 
 /**
  * Additional Linear apps served by the same bridge process.
@@ -29,7 +29,9 @@ import type { Config } from "./config.js";
  * Each app names `clientId` plus `clientSecretFile`/`Env` and
  * `webhookSecretFile`/`Env`. `target` is "claude" or "codex". `kbPath` and
  * `agentOutputPath` are optional absolute paths; unset, the app uses the
- * default app's `KB_PATH` and `AGENT_OUTPUT_PATH`. An app that
+ * default app's `KB_PATH` and `AGENT_OUTPUT_PATH`. `agentOutputPath` is
+ * checked the way `AGENT_OUTPUT_PATH` is: created if missing, then required
+ * to be a writable directory. An app that
  * cannot be configured stops startup with an error naming the app.
  */
 export type AppTarget = { kind: "claude" } | { kind: "codex" };
@@ -174,7 +176,11 @@ export function parseAppsConfig(
     // Each agent's working directory is what gives it its context, so an app
     // may name its own; unset keeps the default app's.
     const kbPath = optionalAbsolutePath(app.kbPath, `${where}.kbPath`);
-    const agentOutputPath = optionalAbsolutePath(app.agentOutputPath, `${where}.agentOutputPath`);
+    const agentOutputPathRaw = optionalAbsolutePath(app.agentOutputPath, `${where}.agentOutputPath`);
+    const agentOutputPath =
+      agentOutputPathRaw === undefined
+        ? undefined
+        : resolveAgentOutputPath(agentOutputPathRaw, `${where}.agentOutputPath`);
 
     const oauthRedirectUri =
       app.oauthRedirectUri === undefined

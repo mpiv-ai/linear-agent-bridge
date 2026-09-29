@@ -229,7 +229,7 @@ function optionalLinearId(
  * Validate the output path once, at startup, so a misconfiguration surfaces
  * before a turn is accepted rather than half way through one.
  */
-function resolveAgentOutputPath(value: string): string {
+export function resolveAgentOutputPath(value: string, label = "AGENT_OUTPUT_PATH"): string {
   const resolved = path.resolve(value);
   let stats;
   try {
@@ -239,20 +239,20 @@ function resolveAgentOutputPath(value: string): string {
       mkdirSync(resolved, { recursive: true, mode: 0o700 });
     } catch {
       throw new Error(
-        `Invalid AGENT_OUTPUT_PATH "${resolved}": could not be created`,
+        `Invalid ${label} "${resolved}": could not be created`,
       );
     }
     return resolved;
   }
   if (!stats.isDirectory()) {
     throw new Error(
-      `Invalid AGENT_OUTPUT_PATH "${resolved}": expected a directory`,
+      `Invalid ${label} "${resolved}": expected a directory`,
     );
   }
   try {
     accessSync(resolved, constants.W_OK);
   } catch {
-    throw new Error(`Invalid AGENT_OUTPUT_PATH "${resolved}": not writable`);
+    throw new Error(`Invalid ${label} "${resolved}": not writable`);
   }
   return resolved;
 }
