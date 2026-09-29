@@ -1,0 +1,392 @@
+import type {
+  AgentRuntime,
+  AgentActivityContent,
+  RuntimeEvent,
+  SessionRequest,
+} from "../types.js";
+import type { Options, Query, SDKMessage } from "@anthropic-ai/claude-agent-sdk";
+import { withLinearAgentSessionContext } from "./prompt.js";
+
+/** Max length of a compact, one-line tool-input summary before truncation. */
+const MAX_ACTION_PARAMETER_LENGTH = 200;
+/** Keep completed tool cards useful without dumping large or sensitive outputs into Linear. */
+const MAX_ACTION_RESULT_LENGTH = 500;
+
+interface PendingToolUse {
+  action: string;
+  parameter: string;
+}
+
+/**
+ * Injectable shape of the SDK's `query()` function. The real one is
+ * lazy-imported (see `defaultQuery` below) so importing this module never
+ * loads the Claude Code CLI; tests inject their own stub and never touch it.
+ */
+type QueryStream = AsyncIterable<SDKMessage> & { close?: () => void };
+
+export type QueryFn = (params: {
+  prompt: string;
+  options?: Options;
+}) => QueryStream;
+
+/**
+ * Default `QueryFn`: a decorated async generator. Calling it returns the
+ * stream synchronously without loading the CLI; first iteration performs
+ * the dynamic import. Its `close()` method forwards to the SDK Query once
+ * available, preserving the process-cleanup handle across lazy loading.
+ */
+function defaultQuery(params: {
+  prompt: string;
+  options?: Options;
+}): QueryStream {
+  let activeQuery: Query | undefined;
+  let closeRequested = false;
+  let activeQueryClosed = false;
+  const closeActiveQuery = (): void => {
+    if (activeQuery !== undefined && !activeQueryClosed) {
+      activeQueryClosed = true;
+      activeQuery.close();
+    }
+  };
+  const stream = (async function* (): AsyncGenerator<SDKMessage, void> {
+    const { query } = await import("@anthropic-ai/claude-agent-sdk");
+    activeQuery = query(params);
+    if (closeRequested) {
+      closeActiveQuery();
+      return;
+    }
+    yield* activeQuery;
+  })();
+  return Object.assign(stream, {
+    close(): void {
+      if (closeRequested) {
+        return;
+      }
+      closeRequested = true;
+      closeActiveQuery();
+    },
+  });
+}
+
+/** Compact one-line JSON summary of a tool call's input, truncated if long. */
+function summarizeToolInput(input: unknown): string {
+  const json = JSON.stringify(input) ?? "";
+  if (json.length <= MAX_ACTION_PARAMETER_LENGTH) {
+    return json;
+  }
+  return `${json.slice(0, MAX_ACTION_PARAMETER_LENGTH - 3)}...`;
+}
+
+/** Compact a tool_result content block into a bounded result for Linear. */
+function summarizeToolResult(content: unknown, isError: boolean): string {
+  if (!isError) {
+    return "Completed.";
+  }
+
+  let text: string;
+  if (typeof content === "string") {
+    text = content;
+  } else if (Array.isArray(content)) {
+    const parts = content.flatMap((block: unknown) => {
+      if (block !== null && typeof block === "object") {
+        const record = block as Record<string, unknown>;
+        if (record.type === "text" && typeof record.text === "string") {
+          return [record.text];
+        }
+        if (record.type === "image") {
+          return ["Image returned."];
+        }
+      }
+      return [];
+    });
+    text = parts.join("\n");
+  } else {
+    text = JSON.stringify(content) ?? "";
+  }
+
+  const compact = text.replace(/\s+/g, " ").trim();
+  const prefixed = compact !== "" ? `Failed: ${compact}` : "Tool failed.";
+  if (prefixed.length <= MAX_ACTION_RESULT_LENGTH) {
+    return prefixed;
+  }
+  return `${prefixed.slice(0, MAX_ACTION_RESULT_LENGTH - 3)}...`;
+}
+
+/**
+ * Startup notice for a Claude runtime with no API key. An API key is the
+ * documented default; a stored Claude Code login is meant for one person
+ * running the bridge for their own requests, because anyone who can mention
+ * the agent in Linear otherwise spends that person's subscription.
+ */
+export function claudeAuthNotice(env: NodeJS.ProcessEnv): string | undefined {
+  if ((env.ANTHROPIC_API_KEY ?? "").trim() !== "") {
+    return undefined;
+  }
+  return "ANTHROPIC_API_KEY is not set, so Claude runs use this service account's Claude Code login. That is appropriate only when only you can mention or delegate to this agent; set ANTHROPIC_API_KEY for a shared workspace.";
+}
+
+/**
+ * Name the credential the SDK reports in its init message. Never a secret:
+ * the SDK sends only the source's name, and "none" means a stored login.
+ */
+function describeAuthSource(source: string): string {
+  return source === "none" ? "Claude Code login" : source;
+}
+
+/**
+ * Claude Agent SDK runtime.
+ *
+ * Implementation contract (verified against SDK docs and the installed
+ * @anthropic-ai/claude-agent-sdk type declarations, 2026-08-12):
+ * - `query({ prompt, options })` from @anthropic-ai/claude-agent-sdk.
+ * - `options.cwd = config.kbPath` — running in your knowledge base (or any
+ *   project) auto-loads its CLAUDE.md stack and your user/project-scope
+ *   MCP servers via `settingSources: ["user", "project"]`.
+ * - `options.resume = request.resumeSessionId` continues a prior session;
+ *   capture the new session id from the init system message and yield it
+ *   as `session-started`.
+ * - NEVER pass `model` or override allowed tools — operator config is the
+ *   source of truth (standing rule). Unattended runs use
+ *   `permissionMode: "bypassPermissions"` (paired with
+ *   `allowDangerouslySkipPermissions: true`, which the SDK's own Options
+ *   type requires to actually take effect).
+ * - Never set `options.env`: the SDK then gives the Claude Code subprocess
+ *   this process's environment, so `ANTHROPIC_API_KEY` in the service
+ *   environment authenticates every run and takes precedence over a stored
+ *   Claude Code login. Without it, runs use the service account's login.
+ *   The init message's `apiKeySource` is logged so operators can confirm
+ *   which one a run used.
+ *
+ * Activity mapping: interim assistant text -> thought; tool use -> action;
+ * final result -> response; a result message with a non-success subtype ->
+ * error. A stream throw is rethrown for the bridge to report.
+ */
+export class ClaudeRuntime implements AgentRuntime {
+  readonly name = "claude";
+  private readonly activeQueryClosers = new WeakMap<AbortController, () => void>();
+
+  constructor(
+    private readonly kbPath: string,
+    private readonly queryFn: QueryFn = defaultQuery,
+    private readonly agentOutputPath?: string,
+  ) {}
+
+  /**
+   * Name the writable directory in the prompt when one is configured.
+   *
+   * This is usability, not enforcement. The filesystem is what stops a write,
+   * and it stops it whether or not the agent was told; telling it only saves a
+   * turn spent discovering the boundary by hitting EACCES. Never pass tool or
+   * permission overrides to do this job: the repository CLAUDE.md forbids them,
+   * and anything enforced inside the agent is advisory anyway.
+   */
+  private composePrompt(prompt: string): string {
+    const contextualPrompt = withLinearAgentSessionContext(prompt);
+    if (this.agentOutputPath === undefined) {
+      return contextualPrompt;
+    }
+    return `${contextualPrompt}\n\nWrite any files you produce to ${this.agentOutputPath}. The working directory may be read-only to this service, so a denied write there is expected rather than something to work around.`;
+  }
+
+  forceCloseSession(request: SessionRequest): void {
+    if (request.abortController !== undefined) {
+      this.activeQueryClosers.get(request.abortController)?.();
+    }
+  }
+
+  async *runSession(request: SessionRequest): AsyncIterable<RuntimeEvent> {
+    const options: Options = {
+      cwd: this.kbPath,
+      settingSources: ["user", "project"],
+      permissionMode: "bypassPermissions",
+      allowDangerouslySkipPermissions: true,
+      stderr: (data: string) => {
+        console.error(`[claude-cli] ${data.trimEnd()}`);
+      },
+      ...(request.abortController !== undefined
+        ? { abortController: request.abortController }
+        : {}),
+      ...(request.resumeSessionId !== undefined
+        ? { resume: request.resumeSessionId }
+        : {}),
+    };
+
+    // The final assistant text and the result message usually carry the same
+    // body; forwarding both renders duplicated text in Linear. Hold each
+    // thought back one step and drop it if the result repeats it.
+    let pendingThought: RuntimeEvent | undefined;
+    let durableAssistantResponseBody: string | undefined;
+    const pendingToolUses = new Map<string, PendingToolUse>();
+    const query = this.queryFn({
+      prompt: this.composePrompt(request.prompt),
+      options,
+    });
+    let queryClosed = false;
+    const closeQuery = (): void => {
+      if (!queryClosed && query.close !== undefined) {
+        queryClosed = true;
+        query.close();
+      }
+    };
+    if (request.abortController !== undefined) {
+      this.activeQueryClosers.set(request.abortController, closeQuery);
+    }
+    request.abortController?.signal.addEventListener("abort", closeQuery, { once: true });
+    if (request.abortController?.signal.aborted === true) {
+      closeQuery();
+    }
+    try {
+      for await (const message of query) {
+        // Every raw SDK message proves the runtime is alive, including
+        // messages whose mapped output is buffered or intentionally hidden.
+        yield { kind: "progress" };
+        if (request.abortController?.signal.aborted === true) {
+          break;
+        }
+        for (const ev of this.mapMessage(message, pendingToolUses)) {
+          const repeatsDurableAssistantResponse =
+            message.type === "result" &&
+            message.subtype === "success" &&
+            ev.kind === "activity" &&
+            ev.activity.type === "response" &&
+            ev.activity.body === durableAssistantResponseBody;
+          if (repeatsDurableAssistantResponse) {
+            continue;
+          }
+          const isDuplicateResponse =
+            ev.kind === "activity" &&
+            ev.activity.type === "response" &&
+            pendingThought?.kind === "activity" &&
+            pendingThought.activity.type === "thought" &&
+            pendingThought.activity.body === ev.activity.body;
+          if (isDuplicateResponse) {
+            pendingThought = undefined;
+          } else if (pendingThought !== undefined) {
+            yield pendingThought;
+            pendingThought = undefined;
+          }
+          if (ev.kind === "activity" && ev.activity.type === "thought") {
+            pendingThought = ev;
+          } else {
+            if (
+              message.type === "assistant" &&
+              ev.kind === "activity" &&
+              ev.activity.type === "response"
+            ) {
+              durableAssistantResponseBody = ev.activity.body;
+            }
+            yield ev;
+          }
+        }
+      }
+      if (request.abortController?.signal.aborted === true) {
+        yield { kind: "done" };
+        return;
+      }
+      if (pendingThought !== undefined) {
+        yield pendingThought;
+      }
+      yield { kind: "done" };
+    } catch (err) {
+      if (request.abortController?.signal.aborted === true) {
+        yield { kind: "done" };
+        return;
+      }
+      if (pendingThought !== undefined) {
+        yield pendingThought;
+      }
+      // The bridge posts one error activity for a thrown turn. Yielding our
+      // own here as well rendered the same failure twice in Linear.
+      throw err;
+    } finally {
+      request.abortController?.signal.removeEventListener("abort", closeQuery);
+      if (
+        request.abortController !== undefined &&
+        this.activeQueryClosers.get(request.abortController) === closeQuery
+      ) {
+        this.activeQueryClosers.delete(request.abortController);
+      }
+    }
+  }
+
+  private *mapMessage(
+    message: SDKMessage,
+    pendingToolUses: Map<string, PendingToolUse>,
+  ): Generator<RuntimeEvent> {
+    if (message.type === "system") {
+      if (message.subtype === "init") {
+        console.log(`[claude] session auth: ${describeAuthSource(message.apiKeySource)}`);
+        yield { kind: "session-started", runtimeSessionId: message.session_id };
+      }
+      return;
+    }
+
+    if (message.type === "assistant") {
+      const isTopLevelEndTurn =
+        message.message.stop_reason === "end_turn" && message.parent_tool_use_id === null;
+      if (isTopLevelEndTurn) {
+        const body = message.message.content
+          .flatMap((block) =>
+            block.type === "text" && block.text.trim() !== "" ? [block.text] : [],
+          )
+          .join("\n");
+        if (body !== "") {
+          yield { kind: "activity", activity: { type: "response", body } };
+        }
+      }
+      for (const block of message.message.content) {
+        if (block.type === "text") {
+          if (!isTopLevelEndTurn && block.text.trim() !== "") {
+            yield { kind: "activity", activity: { type: "thought", body: block.text } };
+          }
+        } else if (block.type === "tool_use") {
+          const activity: AgentActivityContent = {
+            type: "action",
+            action: block.name,
+            parameter: summarizeToolInput(block.input),
+          };
+          pendingToolUses.set(block.id, {
+            action: activity.action,
+            parameter: activity.parameter,
+          });
+          yield { kind: "activity", activity };
+        }
+      }
+      return;
+    }
+
+    if (message.type === "user" && Array.isArray(message.message.content)) {
+      for (const block of message.message.content) {
+        if (block.type !== "tool_result") {
+          continue;
+        }
+        const toolUse = pendingToolUses.get(block.tool_use_id);
+        if (toolUse === undefined) {
+          continue;
+        }
+        pendingToolUses.delete(block.tool_use_id);
+        yield {
+          kind: "activity",
+          activity: {
+            type: "action",
+            action: toolUse.action,
+            parameter: toolUse.parameter,
+            result: summarizeToolResult(block.content, block.is_error === true),
+          },
+        };
+      }
+      return;
+    }
+
+    if (message.type === "result") {
+      if (message.subtype === "success") {
+        yield { kind: "activity", activity: { type: "response", body: message.result } };
+      } else {
+        yield {
+          kind: "activity",
+          activity: { type: "error", body: message.errors.join("; ") },
+        };
+      }
+    }
+  }
+}

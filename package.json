@@ -1,0 +1,46 @@
+{
+  "name": "linear-agent-bridge",
+  "version": "0.2.0",
+  "private": true,
+  "type": "module",
+  "description": "Bridge Linear agent sessions to a local agent runtime",
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/mpiv-ai/linear-agent-bridge.git"
+  },
+  "homepage": "https://github.com/mpiv-ai/linear-agent-bridge#readme",
+  "bugs": {
+    "url": "https://github.com/mpiv-ai/linear-agent-bridge/issues"
+  },
+  "engines": {
+    "node": ">=22"
+  },
+  "scripts": {
+    "predev": "npm run native:build",
+    "dev": "tsx --env-file-if-exists=.env src/index.ts",
+    "prebuild": "npm run native:build",
+    "build": "tsc",
+    "prestart": "npm run native:build",
+    "start": "node dist/index.js",
+    "typecheck": "tsc --noEmit && tsc -p tsconfig.check.json",
+    "pretest": "npm run native:build",
+    "test": "vitest run",
+    "test:engine": "node scripts/test-engine.mjs",
+    "test:install": "bash -n deploy/install.sh deploy/install.test.sh && bash deploy/install.test.sh",
+    "pretest:watch": "npm run native:build",
+    "test:watch": "vitest",
+    "native:build": "node scripts/build-native.mjs",
+    "native:check": "node scripts/build-native.mjs --check"
+  },
+  "dependencies": {
+    "@anthropic-ai/claude-agent-sdk": "^0.3.228",
+    "@openai/codex-sdk": "^0.155.0"
+  },
+  "devDependencies": {
+    "@types/node": "^24.0.0",
+    "tsx": "^4.19.0",
+    "typescript": "^5.7.0",
+    "vitest": "^3.0.0"
+  }
+}
