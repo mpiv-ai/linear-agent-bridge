@@ -159,9 +159,12 @@ See [Security notes](docs/operations.md#security-notes) and
    truncated to 200 characters, failures to 500), and final response back to
    the Linear session through the Linear GraphQL API.
 
-The bridge sends no telemetry and talks to nothing else. Session transcripts and
-runtime state are kept by the runtime under the service account's home
-directory (`~/.claude/` or `~/.codex/`), not in `KB_PATH`.
+The bridge process sends no telemetry and contacts only Linear. The agent is
+different: it runs as the service account with permissions bypassed, so it can
+reach anything that account can, including the web and any tool it chooses to
+run. Session transcripts and runtime state are kept by the runtime under the
+service account's home directory (`~/.claude/` or `~/.codex/`), not in
+`KB_PATH`.
 
 ## Engines
 
