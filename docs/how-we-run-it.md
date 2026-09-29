@@ -39,12 +39,12 @@ same durable path as a webhook, so the work never runs twice.
 The engine is the part of each app that does the work, and every app picks its
 own.
 
-- **Claude or Codex in a working directory.** Most of our agents run like this.
-  The working directory is what gives each agent its context: its
-  `CLAUDE.md` or `AGENTS.md`, skills, and MCP servers. A research agent points
-  at notes, and a build agent points at a checkout. Each runs as a service
-  account with an API key. Its working tree is read-only, and it has one
-  writable output folder (see
+- **Claude or Codex in a working directory.** The working directory is what
+  gives an agent its context: its `CLAUDE.md` or `AGENTS.md`, skills, and MCP
+  servers. Each app can name its own with `kbPath`, so a research agent can
+  point at notes and a build agent at a checkout. Keep the working tree
+  read-only and give each agent one writable output folder with
+  `agentOutputPath` (see
   [confining what the agent can write](operations.md#confining-what-the-agent-can-write)).
 - **An external workbench.** Some of our agents hand each Linear session to BB,
   the agent workbench we use day to day, which runs it as a durable thread. The

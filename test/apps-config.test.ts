@@ -173,6 +173,44 @@ describe("BRIDGE_APPS_FILE", () => {
     ).toThrow("stateDir: expected an absolute path");
   });
 
+  it("gives an app its own working directory and output folder, defaulting to the base config's", () => {
+    const kbPath = path.join(dir, "research-notes");
+    const agentOutputPath = path.join(dir, "research-output");
+    const [own, inherited] = parseAppsConfig(
+      {
+        apps: [
+          builderApp({ kbPath, agentOutputPath }),
+          {
+            ...builderApp({
+              id: "writer",
+              clientId: "writer-client",
+              stateDir: path.join(dir, "apps", "writer"),
+            }),
+            clientSecretFile: secretFile("writer-client-secret", "writer-client-secret-value"),
+            webhookSecretFile: secretFile("writer-webhook-secret", "writer-webhook-secret-value"),
+          },
+        ],
+      },
+      { ...base, kbPath: "/srv/default-kb", agentOutputPath: "/srv/default-output" },
+      {},
+    ).apps;
+
+    expect(own!.config).toMatchObject({ kbPath, agentOutputPath });
+    expect(inherited!.config).toMatchObject({
+      kbPath: "/srv/default-kb",
+      agentOutputPath: "/srv/default-output",
+    });
+  });
+
+  it("rejects a relative working directory or output folder", () => {
+    expect(() =>
+      parseAppsConfig({ apps: [builderApp({ kbPath: "notes" })] }, base, {}),
+    ).toThrow("kbPath: expected an absolute path");
+    expect(() =>
+      parseAppsConfig({ apps: [builderApp({ agentOutputPath: "out" })] }, base, {}),
+    ).toThrow("agentOutputPath: expected an absolute path");
+  });
+
   it("requires an apps array", () => {
     for (const raw of [{}, { apps: {} }, [], null]) {
       expect(() => parseAppsConfig(raw, base, {})).toThrow(

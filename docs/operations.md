@@ -608,7 +608,9 @@ different working directories. Set `BRIDGE_APPS_FILE` to a JSON file:
     "auth": "client_credentials",
     "appUserId": "<linear app user uuid>",
     "target": "codex",
-    "stateDir": "/var/lib/linear-agent-bridge/apps/research"
+    "stateDir": "/var/lib/linear-agent-bridge/apps/research",
+    "kbPath": "/srv/research-notes",
+    "agentOutputPath": "/srv/research-output"
   }]
 }
 ```
@@ -618,6 +620,11 @@ different working directories. Set `BRIDGE_APPS_FILE` to a JSON file:
 - Reference each secret by a `*File` path or a `*Env` variable name. Inline
   secrets are rejected.
 - `target` is `claude` or `codex`.
+- `kbPath` is the app's working directory, and `agentOutputPath` its writable
+  output folder. Both are optional absolute paths; unset, the app uses the
+  default app's `KB_PATH` and `AGENT_OUTPUT_PATH`. The service account needs
+  the same access to them as to the default app's
+  (see [Confining what the agent can write](#confining-what-the-agent-can-write)).
 - `auth` is either the authorization-code flow (the default, authorized once in
   a browser like the default app) or `client_credentials`. Client-credentials
   apps mint their own tokens and have no authorization URL.

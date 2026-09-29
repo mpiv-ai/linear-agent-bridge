@@ -20,12 +20,16 @@ import type { Config } from "./config.js";
  *     "auth": "client_credentials",
  *     "appUserId": "<linear app user uuid>",
  *     "target": "claude",
- *     "stateDir": "/var/lib/linear-agent-bridge/apps/builder"
+ *     "stateDir": "/var/lib/linear-agent-bridge/apps/builder",
+ *     "kbPath": "/srv/builder-checkout",
+ *     "agentOutputPath": "/srv/builder-output"
  *   }]
  * }
  *
  * Each app names `clientId` plus `clientSecretFile`/`Env` and
- * `webhookSecretFile`/`Env`. `target` is "claude" or "codex". An app that
+ * `webhookSecretFile`/`Env`. `target` is "claude" or "codex". `kbPath` and
+ * `agentOutputPath` are optional absolute paths; unset, the app uses the
+ * default app's `KB_PATH` and `AGENT_OUTPUT_PATH`. An app that
  * cannot be configured stops startup with an error naming the app.
  */
 export type AppTarget = { kind: "claude" } | { kind: "codex" };
@@ -167,6 +171,11 @@ export function parseAppsConfig(
       seenPaths.add(statePath);
     }
 
+    // Each agent's working directory is what gives it its context, so an app
+    // may name its own; unset keeps the default app's.
+    const kbPath = optionalAbsolutePath(app.kbPath, `${where}.kbPath`);
+    const agentOutputPath = optionalAbsolutePath(app.agentOutputPath, `${where}.agentOutputPath`);
+
     const oauthRedirectUri =
       app.oauthRedirectUri === undefined
         ? base.oauthRedirectUri
@@ -189,6 +198,8 @@ export function parseAppsConfig(
       linearWebhookSecret: webhookSecret,
       oauthRedirectUri,
       runtime: target.kind,
+      ...(kbPath !== undefined ? { kbPath } : {}),
+      ...(agentOutputPath !== undefined ? { agentOutputPath } : {}),
       sessionStorePath,
       bridgeStateStorePath,
       oauthTokenStorePath,
@@ -198,6 +209,17 @@ export function parseAppsConfig(
   }
 
   return { apps };
+}
+
+function optionalAbsolutePath(value: unknown, where: string): string | undefined {
+  if (value === undefined) {
+    return undefined;
+  }
+  const resolved = requireString(value, where);
+  if (!path.isAbsolute(resolved)) {
+    throw new Error(`Invalid ${where}: expected an absolute path`);
+  }
+  return resolved;
 }
 
 /**
