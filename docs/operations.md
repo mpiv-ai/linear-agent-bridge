@@ -646,3 +646,13 @@ inside launchd's 20-second `SIGKILL` window; systemd's default
 deadline elapses the process logs a bounded diagnostic and exits 1 rather than
 hanging. A second signal during shutdown does not start a second close and does
 not shorten the deadline.
+
+The agent runs as a child process of the bridge. The installed services stop
+both together: systemd's default `KillMode=control-group` ends the unit's whole
+control group, and launchd ends the job's process group. A bridge you run by
+hand is different. If it is killed with `SIGKILL`, for example `kill -9` on
+`npm run dev` or a container without an init process, a running agent can keep
+working and writing files after the bridge is gone. The restarted
+bridge still reports that turn as interrupted and never reruns it. Stop a
+manual run with `Ctrl-C` or `SIGTERM`, which closes active turns, or kill its
+whole process group.

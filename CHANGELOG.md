@@ -1,5 +1,15 @@
 # Changelog
 
+## Unreleased
+
+- Additional apps can set their own working directory (`kbPath`) and output
+  folder (`agentOutputPath`) in `BRIDGE_APPS_FILE`. Previously every app ran
+  in the default app's `KB_PATH`, although the docs said otherwise.
+- The README states the data flow precisely: the bridge process contacts only
+  Linear, and the agent can reach anything its service account can.
+- The operations guide explains that a bridge killed with `SIGKILL` outside
+  the installed service can leave its agent running.
+
 ## 0.2.0
 
 First public version. Earlier development happened in a private repository;
